@@ -84,7 +84,7 @@ export default function ChatPage() {
         <CardHeader className="border-b bg-white">
           <CardTitle className="flex items-center gap-2">
             <Bot className="h-5 w-5 text-primary" />
-            <span>🛍️ AI Support Chat</span>
+            <span>AI Support Chat</span>
           </CardTitle>
         </CardHeader>
 
@@ -97,7 +97,7 @@ export default function ChatPage() {
                 <p>How can I help you today? Ask me anything about our products or services.</p>
               </div>
             ) : (
-              <div className="space-y-4 pt-2 pb-6">
+              <div className="space-y-2 pt-2 pb-4">
                 {messages.map((message, index) => (
                   <div key={index} className="space-y-4">
                     {/* User message */}
