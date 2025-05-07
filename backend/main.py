@@ -1,20 +1,23 @@
 from fastapi import FastAPI, Request
 import google.generativeai as genai
-import os
+from langchain_community.vectorstores import FAISS
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain.schema import Document
 from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
+import os
 
 load_dotenv()
+api_key = os.getenv("GEMINI_API_KEY")
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-# Configure Gemini API
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.0-flash')
+# Setup
+genai.configure(api_key=api_key)
+embedding = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+# Add allow_dangerous_deserialization=True to explicitly allow loading the pickle file
+vectorstore = FAISS.load_local("retriever_index", embedding, allow_dangerous_deserialization=True)
+model = genai.GenerativeModel("gemini-2.0-flash")
 
 app = FastAPI()
-
-# Enable CORS for frontend connection
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -28,9 +31,18 @@ async def chat(request: Request):
     data = await request.json()
     question = data.get("question", "")
 
-    if not question:
-        return {"response": "Please provide a valid question."}
+    # Retrieve top 2 relevant FAQ entries
+    retrieved_docs = vectorstore.similarity_search(question, k=2)
+    context = "\n".join([doc.page_content for doc in retrieved_docs])
 
-    response = model.generate_content(question)
+    # Ask Gemini with context
+    prompt = f"""You are a helpful customer support assistant. Use the following FAQ context to answer the question.
 
+    Context:
+    {context}
+
+    Question: {question}
+    Answer:"""
+
+    response = model.generate_content(prompt)
     return {"response": response.text}
