@@ -60,10 +60,10 @@ export default function ChatPage() {
       })
     } catch (error) {
       console.error("Error sending message:", error)
-      // Update with error message
+      // Update with error message in Khmer
       setMessages((prev) => {
         const newMessages = [...prev]
-        newMessages[newMessages.length - 1].bot = "Sorry, I couldn't process your request. Please try again."
+        newMessages[newMessages.length - 1].bot = "សូមអភ័យទោស មានបញ្ហាក្នុងការដំណើរការសំណើរបស់អ្នក។ សូមព្យាយាមម្តងទៀត។"
         return newMessages
       })
     } finally {
@@ -84,7 +84,7 @@ export default function ChatPage() {
         <CardHeader className="border-b bg-white">
           <CardTitle className="flex items-center gap-2">
             <Bot className="h-5 w-5 text-primary" />
-            <span>AI Support Chat</span>
+            <span>ជំនួយការគាំទ្រអតិថិជន AI</span>
           </CardTitle>
         </CardHeader>
 
@@ -93,8 +93,8 @@ export default function ChatPage() {
             {messages.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-full text-center text-muted-foreground p-8">
                 <Bot className="h-12 w-12 mb-4 text-primary/40" />
-                <h3 className="text-lg font-semibold mb-2">Welcome to Customer Support</h3>
-                <p>How can I help you today? Ask me anything about our products or services.</p>
+                <h3 className="text-lg font-semibold mb-2">សូមស្វាគមន៍មកកាន់ការគាំទ្រអតិថិជន</h3>
+                <p>តើខ្ញុំអាចជួយអ្នកយ៉ាងដូចម្តេចនៅថ្ងៃនេះ? សូមសួរខ្ញុំអំពីផលិតផលឬសេវាកម្មរបស់យើង។</p>
               </div>
             ) : (
               <div className="space-y-2 pt-2 pb-4">
@@ -128,7 +128,7 @@ export default function ChatPage() {
                             {isLoading && index === messages.length - 1 ? (
                               <div className="flex items-center gap-2">
                                 <Loader2 className="h-4 w-4 animate-spin" />
-                                <span>Thinking...</span>
+                                <span>កំពុងគិត...</span>
                               </div>
                             ) : (
                               message.bot
@@ -152,13 +152,13 @@ export default function ChatPage() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Type your message here..."
+              placeholder="វាយសារអ្នកនៅទីនេះ..."
               className="flex-1"
               disabled={isLoading}
             />
             <Button onClick={sendMessage} size="icon" disabled={isLoading || !input.trim()}>
               {isLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-              <span className="sr-only">Send message</span>
+              <span className="sr-only">ផ្ញើសារ</span>
             </Button>
           </div>
         </CardFooter>

@@ -5,34 +5,52 @@ from langchain.text_splitter import CharacterTextSplitter
 from langchain.docstore.document import Document
 import os
 from dotenv import load_dotenv
+import csv
 
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
 
-# Load FAQ data with error handling
+# File path
+faq_file = "backend/data/faq_khmer.csv"  
+
+# First, clean up the CSV file
+cleaned_data = {"question": [], "answer": []}
+
 try:
-    # Try loading with quoting to handle commas within fields
-    df = pd.read_csv("data/faq.csv", quoting=pd.io.common.csv.QUOTE_ALL)
-except:
-    try:
-        # Try loading with manual column names and skipping problematic rows
-        df = pd.read_csv("data/faq.csv", on_bad_lines='skip', names=['question', 'answer'])
-    except:
-        # Fall back to reading as raw text
-        with open("data/faq.csv", 'r') as file:
-            lines = file.readlines()
-            # Skip header
-            data = {'question': [], 'answer': []}
-            for line in lines[1:]:
-                try:
-                    parts = line.strip().split(',')
-                    if len(parts) >= 2:
-                        data['question'].append(parts[0])
-                        # Join remaining parts as answer (in case answer contains commas)
-                        data['answer'].append(','.join(parts[1:]))
-                except:
-                    print(f"Skipping problematic line: {line.strip()}")
-            df = pd.DataFrame(data)
+    with open(faq_file, 'r', encoding='utf-8') as file:
+        # Skip the first line if it contains the filepath comment
+        first_line = file.readline()
+        if "filepath:" in first_line:
+            # Skip the comment line
+            header = file.readline().strip()
+        else:
+            # Use the first line as header
+            header = first_line.strip()
+        
+        # Continue reading the rest of the file
+        for line in file:
+            line = line.strip()
+            # Skip empty lines
+            if not line:
+                continue
+                
+            # Handle the actual data rows
+            if "," in line:
+                # Find first comma to split question and answer
+                split_pos = line.find(',')
+                if split_pos > 0:
+                    question = line[:split_pos].strip()
+                    answer = line[split_pos+1:].strip()
+                    cleaned_data["question"].append(question)
+                    cleaned_data["answer"].append(answer)
+                    
+    # Create DataFrame from cleaned data
+    df = pd.DataFrame(cleaned_data)
+    print(f"Successfully parsed {len(df)} FAQ entries")
+    
+except Exception as e:
+    print(f"Error reading CSV: {e}")
+    raise
 
 # Create text documents from DataFrame
 texts = [f"Q: {row['question']} A: {row['answer']}" for _, row in df.iterrows()]
@@ -47,3 +65,5 @@ vectorstore = FAISS.from_documents(docs, embeddings)
 
 # Save FAISS index locally
 vectorstore.save_local("retriever_index")
+
+print("FAQ retriever index created successfully!")

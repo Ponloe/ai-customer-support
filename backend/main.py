@@ -35,14 +35,16 @@ async def chat(request: Request):
     retrieved_docs = vectorstore.similarity_search(question, k=2)
     context = "\n".join([doc.page_content for doc in retrieved_docs])
 
-    # Ask Gemini with context
-    prompt = f"""You are a helpful customer support assistant. Use the following FAQ context to answer the question.
+    # Ask Gemini with context - Modified to request Khmer responses
+    prompt = f"""You are a helpful customer support assistant. You must respond in Khmer language.
+    Use the following FAQ context to answer the question. If the question is in English, translate 
+    your response to Khmer. If the question is in Khmer, answer in Khmer.
 
     Context:
     {context}
 
     Question: {question}
-    Answer:"""
+    Answer (in Khmer):"""
 
     response = model.generate_content(prompt)
     return {"response": response.text}
