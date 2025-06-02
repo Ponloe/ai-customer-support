@@ -7,30 +7,39 @@ from dotenv import load_dotenv
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import json
-from sqlalchemy import create_engine, text
+import httpx
+import logging
+from typing import List, Dict, Optional
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
 
-# Database connection - updated to match .env file
-DB_HOST = os.getenv("DB_HOST", "127.0.0.1")
-DB_PORT = os.getenv("DB_PORT", "3306")
-DB_USER = os.getenv("DB_USERNAME", "root")  
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-DB_NAME = os.getenv("DB_DATABASE", "ecommerce")  
+# Laravel API configuration
+LARAVEL_API_BASE_URL = "http://192.168.5.109:8000/v1"
+API_TIMEOUT = 30.0
 
-# Create database connection
-DATABASE_URL = f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
-engine = create_engine(DATABASE_URL)
+# Setup Gemini with error handling
+try:
+    genai.configure(api_key=api_key)
+    embedding = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+    # Check if FAISS index exists
+    if os.path.exists("retriever_index"):
+        vectorstore = FAISS.load_local("retriever_index", embedding, allow_dangerous_deserialization=True)
+        logger.info("FAISS vectorstore loaded successfully")
+    else:
+        logger.warning("FAISS index not found. Run load_faq.py first.")
+        vectorstore = None
+    model = genai.GenerativeModel("gemini-2.0-flash")
+except Exception as e:
+    logger.error(f"AI setup failed: {e}")
+    vectorstore = None
+    model = None
 
-# Setup Gemini
-genai.configure(api_key=api_key)
-embedding = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
-# Add allow_dangerous_deserialization=True to explicitly allow loading the pickle file
-vectorstore = FAISS.load_local("retriever_index", embedding, allow_dangerous_deserialization=True)
-model = genai.GenerativeModel("gemini-2.0-flash")
-
-app = FastAPI()
+app = FastAPI(title="AI Customer Support API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -39,261 +48,360 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Database helper functions
-def get_product_stock(product_name=None, product_id=None):
-    """Query database for product stock information"""
+# API helper functions
+async def api_request(endpoint: str, method: str = "GET", params: dict = None) -> dict:
+    """Make HTTP request to Laravel API"""
     try:
-        with engine.connect() as connection:
-            if product_name:
-                # Search by product name (case-insensitive partial match)
-                query = text("""
-                    SELECT p.id, p.name, p.description, p.price, p.stock, c.name as category, b.name as brand
-                    FROM products p
-                    LEFT JOIN categories c ON p.category_id = c.id
-                    LEFT JOIN brands b ON p.brand_id = b.id
-                    WHERE p.name LIKE :name
-                    LIMIT 5
-                """)
-                result = connection.execute(query, {"name": f"%{product_name}%"})
-            elif product_id:
-                # Search by exact product ID
-                query = text("""
-                    SELECT p.id, p.name, p.description, p.price, p.stock, c.name as category, b.name as brand
-                    FROM products p
-                    LEFT JOIN categories c ON p.category_id = c.id
-                    LEFT JOIN brands b ON p.brand_id = b.id
-                    WHERE p.id = :id
-                """)
-                result = connection.execute(query, {"id": product_id})
+        async with httpx.AsyncClient(timeout=API_TIMEOUT) as client:
+            url = f"{LARAVEL_API_BASE_URL}{endpoint}"
+            
+            if method == "GET":
+                response = await client.get(url, params=params)
             else:
-                return []
-                
-            products = []
-            for row in result:
-                products.append({
-                    "id": row.id,
-                    "name": row.name,
-                    "description": row.description,
-                    "price": float(row.price) if row.price else 0.0,
-                    "stock": row.stock if row.stock is not None else 0,
-                    "category": row.category,
-                    "brand": row.brand,
-                    "availability": "In Stock" if row.stock > 0 else "Out of Stock"
-                })
-            return products
+                response = await client.request(method, url, json=params)
+            
+            response.raise_for_status()
+            return response.json()
+    except httpx.RequestError as e:
+        logger.error(f"API request failed for {endpoint}: {e}")
+        return {}
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP error for {endpoint}: {e.response.status_code}")
+        return {}
     except Exception as e:
-        print(f"Database error in get_product_stock: {e}")
-        return []
+        logger.error(f"Unexpected error for {endpoint}: {e}")
+        return {}
 
-def get_product_recommendations(category=None, brand=None, limit=5):
-    """Query database for product recommendations"""
+async def get_all_products() -> List[Dict]:
+    """Get all products from Laravel API"""
+    response = await api_request("/products")
+    products_data = response.get("data", [])
+    
+    # Transform API response to match expected format
+    products = []
+    for product in products_data:
+        products.append({
+            "id": product.get("id"),
+            "name": product.get("name"),
+            "description": product.get("description"),
+            "price": float(product.get("price", 0)),
+            "stock": product.get("stock_quantity", 0),
+            "category": product.get("category", {}).get("name") if product.get("category") else None,
+            "brand": product.get("brand", {}).get("name") if product.get("brand") else None,
+            "availability": "In Stock" if product.get("stock_quantity", 0) > 0 else "Out of Stock",
+            "is_active": product.get("is_active", True)
+        })
+    return products
+
+async def get_product_by_id(product_id: int) -> Dict:
+    """Get specific product by ID from Laravel API"""
+    response = await api_request(f"/products/{product_id}")
+    if not response:
+        return {}
+    
+    product = response
+    return {
+        "id": product.get("id"),
+        "name": product.get("name"),
+        "description": product.get("description"),
+        "price": float(product.get("price", 0)),
+        "stock": product.get("stock_quantity", 0),
+        "category": product.get("category", {}).get("name") if product.get("category") else None,
+        "brand": product.get("brand", {}).get("name") if product.get("brand") else None,
+        "availability": "In Stock" if product.get("stock_quantity", 0) > 0 else "Out of Stock",
+        "is_active": product.get("is_active", True)
+    }
+
+async def get_product_stock(product_name=None, product_id=None):
+    """Search for products by name or get by ID"""
     try:
-        with engine.connect() as connection:
-            conditions = []
-            params = {}
+        if product_id:
+            product = await get_product_by_id(product_id)
+            return [product] if product else []
+        
+        if product_name:
+            # Get all products and filter by name
+            all_products = await get_all_products()
+            product_name_lower = product_name.lower()
             
-            if category:
-                conditions.append("c.name LIKE :category")
-                params["category"] = f"%{category}%"
-                
-            if brand:
-                conditions.append("b.name LIKE :brand")  
-                params["brand"] = f"%{brand}%"
-                
-            # If no conditions, we'll return top products
-            where_clause = " AND ".join(conditions)
-            if where_clause:
-                where_clause = f"WHERE {where_clause}"
+            # Filter products by name similarity
+            matching_products = []
+            for product in all_products:
+                if product.get("name"):
+                    name_lower = product["name"].lower()
+                    description_lower = (product.get("description") or "").lower()
+                    
+                    # Exact match gets highest priority
+                    if product_name_lower == name_lower:
+                        matching_products.insert(0, product)
+                    # Partial name match
+                    elif product_name_lower in name_lower:
+                        matching_products.append(product)
+                    # Description match (lower priority)
+                    elif product_name_lower in description_lower:
+                        matching_products.append(product)
             
-            # Use a safer format for the SQL query with text()    
-            query = text(f"""
-                SELECT p.id, p.name, p.description, p.price, p.stock, c.name as category, b.name as brand
-                FROM products p
-                LEFT JOIN categories c ON p.category_id = c.id
-                LEFT JOIN brands b ON p.brand_id = b.id
-                {where_clause}
-                ORDER BY p.stock DESC
-                LIMIT :limit
-            """)
-            
-            # Add limit parameter
-            params["limit"] = limit
-            
-            result = connection.execute(query, params)
-            
-            products = []
-            for row in result:
-                products.append({
-                    "id": row.id,
-                    "name": row.name,
-                    "description": row.description,
-                    "price": float(row.price) if row.price else 0.0,
-                    "stock": row.stock if row.stock is not None else 0,
-                    "category": row.category,
-                    "brand": row.brand,
-                    "availability": "In Stock" if row.stock > 0 else "Out of Stock"
-                })
-            return products
+            return matching_products[:10]  # Limit to 10 results
+        
+        return []
     except Exception as e:
-        print(f"Database error in get_product_recommendations: {e}")
+        logger.error(f"Error in get_product_stock: {e}")
         return []
 
-def get_categories():
-    """Retrieve all product categories from the database"""
+async def get_product_recommendations(category=None, brand=None, limit=8):
+    """Get product recommendations filtered by category or brand"""
     try:
-        with engine.connect() as connection:
-            query = text("""
-                SELECT id, name, description 
-                FROM categories 
-                ORDER BY name
-            """)
-            result = connection.execute(query)
+        all_products = await get_all_products()
+        filtered_products = []
+        
+        for product in all_products:
+            # Filter by category if specified
+            if category and product.get("category"):
+                if category.lower() not in product["category"].lower():
+                    continue
             
-            categories = []
-            for row in result:
-                categories.append({
-                    "id": row.id,
-                    "name": row.name,
-                    "description": row.description if hasattr(row, "description") else None
-                })
-            return categories
+            # Filter by brand if specified
+            if brand and product.get("brand"):
+                if brand.lower() not in product["brand"].lower():
+                    continue
+            
+            # Only include active products
+            if product.get("is_active", True):
+                filtered_products.append(product)
+        
+        # Sort by stock (descending) then price (ascending)
+        filtered_products.sort(key=lambda x: (-x.get("stock", 0), x.get("price", 0)))
+        
+        return filtered_products[:limit]
     except Exception as e:
-        print(f"Database error in get_categories: {e}")
+        logger.error(f"Error in get_product_recommendations: {e}")
         return []
 
-# new endpoint to retrieve categories
+async def get_categories():
+    """Get all categories from Laravel API"""
+    try:
+        response = await api_request("/categories")
+        categories_data = response.get("data", [])
+        
+        categories = []
+        for category in categories_data:
+            categories.append({
+                "id": category.get("id"),
+                "name": category.get("name"),
+                "description": category.get("description"),
+                "product_count": category.get("products_count", 0),
+                "is_active": category.get("is_active", True)
+            })
+        
+        return categories
+    except Exception as e:
+        logger.error(f"Error in get_categories: {e}")
+        return []
+
+async def get_brands():
+    """Get all brands from Laravel API"""
+    try:
+        response = await api_request("/brands")
+        brands_data = response.get("data", [])
+        
+        brands = []
+        for brand in brands_data:
+            brands.append({
+                "id": brand.get("id"),
+                "name": brand.get("name"),
+                "description": brand.get("description"),
+                "product_count": brand.get("products_count", 0),
+                "is_active": brand.get("is_active", True)
+            })
+        
+        return brands
+    except Exception as e:
+        logger.error(f"Error in get_brands: {e}")
+        return []
+
+# Health check endpoint
+@app.get("/health")
+async def health_check():
+    """Check system health"""
+    status = {
+        "api": "healthy",
+        "laravel_api": "disconnected",
+        "ai_model": "unavailable",
+        "vectorstore": "unavailable"
+    }
+    
+    # Test Laravel API connection
+    try:
+        test_response = await api_request("/products")
+        if test_response:
+            status["laravel_api"] = "connected"
+    except:
+        pass
+    
+    if model:
+        status["ai_model"] = "available"
+    
+    if vectorstore:
+        status["vectorstore"] = "available"
+    
+    return status
+
+# Enhanced categories endpoint
 @app.get("/categories")
 async def browse_categories():
     try:
-        categories = get_categories()
+        categories = await get_categories()
         return {"categories": categories}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to retrieve categories: {str(e)}")
 
-
+@app.get("/brands")
+async def browse_brands():
+    try:
+        brands = await get_brands()
+        return {"brands": brands}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to retrieve brands: {str(e)}")
 
 @app.post("/chat")
 async def chat(request: Request):
+    if not model:
+        return {"response": "AI service is currently unavailable. Please try again later."}
+    
     try:
         data = await request.json()
-        question = data.get("question", "")
+        question = data.get("question", "").strip()
         
-        # Process the question to identify intent
+        if not question:
+            return {"response": "Please ask me a question about our products or services."}
+        
+        # Enhanced intent detection
         intent_prompt = f"""
-        Analyze the following customer query and categorize it:
-        Query: {question}
+        Analyze this customer query and extract information:
+        Query: "{question}"
         
-        Extract as much product information as possible, including partial matches.
-        Respond in JSON format:
+        Respond with JSON:
         {{
-          "intent": "stock_check" | "product_recommendation" | "category_browsing" | "general",
-          "product_name": "<extracted product name if applicable>" | null,
-          "category": "<extracted category if applicable>" | null,
-          "brand": "<extracted brand if applicable>" | null,
-          "specifications": ["<any product specs mentioned>"] | []
+          "intent": "stock_check" | "product_recommendation" | "category_browsing" | "brand_browsing" | "general",
+          "product_name": "<specific product name>" | null,
+          "category": "<product category>" | null,
+          "brand": "<brand name>" | null,
+          "confidence": 0.0-1.0
         }}
-        Note: If the user is asking to browse, list, or see product categories, classify as "category_browsing".
+        
+        Guidelines:
+        - "stock_check": specific product availability 
+        - "product_recommendation": general product suggestions
+        - "category_browsing": asking about product categories
+        - "brand_browsing": asking about brands
+        - "general": FAQ, policies, support questions
         """
         
-        intent_response = model.generate_content(intent_prompt)
         try:
+            intent_response = model.generate_content(intent_prompt)
             intent_data = json.loads(intent_response.text)
-            if "specifications" not in intent_data:
-                intent_data["specifications"] = []
+            logger.info(f"Intent detected: {intent_data}")
         except Exception as e:
-            print(f"Error parsing intent response: {e}")
-            intent_data = {"intent": "general", "product_name": None, "category": None, "brand": None, "specifications": []}
+            logger.error(f"Intent parsing failed: {e}")
+            intent_data = {"intent": "general", "confidence": 0.5}
         
         # Gather context based on intent
         db_context = ""
         product_results = []
         categories_list = []
+        brands_list = []
         
-        if intent_data["intent"] == "category_browsing":
-            # Retrieve all categories
-            categories = get_categories()
-            categories_list = categories  
+        if intent_data.get("intent") == "category_browsing":
+            categories = await get_categories()
+            categories_list = categories
             
             if categories:
-                db_context += "\nAvailable Product Categories:\n"
+                db_context += "\n=== Available Product Categories ===\n"
                 for category in categories:
-                    # Include both name and description in the context
-                    category_desc = f" - {category['description']}" if category['description'] else ""
-                    db_context += f"- {category['name']}{category_desc}\n"
+                    desc = f" - {category['description']}" if category.get('description') else ""
+                    count = f" ({category['product_count']} products)" if category.get('product_count') else ""
+                    db_context += f"• {category['name']}{desc}{count}\n"
             else:
-                db_context += "\nNo product categories found.\n"
+                db_context += "\nNo product categories available.\n"
         
-        elif intent_data["intent"] == "stock_check":
-            # First try with specific product name if available
-            if intent_data["product_name"]:
-                product_results = get_product_stock(product_name=intent_data["product_name"])
+        elif intent_data.get("intent") == "brand_browsing":
+            brands = await get_brands()
+            brands_list = brands
             
-            # If no specific product but brand is mentioned, get brand products
-            elif intent_data["brand"]:
-                product_results = get_product_recommendations(brand=intent_data["brand"], limit=8)
-            
-            # If no results yet but category is mentioned, get category products
-            if not product_results and intent_data["category"]:
-                product_results = get_product_recommendations(category=intent_data["category"], limit=8)
+            if brands:
+                db_context += "\n=== Available Brands ===\n"
+                for brand in brands:
+                    desc = f" - {brand['description']}" if brand.get('description') else ""
+                    count = f" ({brand['product_count']} products)" if brand.get('product_count') else ""
+                    db_context += f"• {brand['name']}{desc}{count}\n"
+            else:
+                db_context += "\nNo brands available.\n"
+        
+        elif intent_data.get("intent") == "stock_check":
+            if intent_data.get("product_name"):
+                product_results = await get_product_stock(product_name=intent_data["product_name"])
+            elif intent_data.get("brand"):
+                product_results = await get_product_recommendations(brand=intent_data["brand"], limit=10)
+            elif intent_data.get("category"):
+                product_results = await get_product_recommendations(category=intent_data["category"], limit=10)
             
             if product_results:
-                db_context += f"\nProduct Information:\n"
+                db_context += "\n=== Product Information ===\n"
                 for product in product_results:
-                    db_context += f"- {product['name']}: {product['stock']} units available, Price: ${product['price']:.2f}, {product['availability']}\n"
+                    db_context += f"• {product['name']} | ${product['price']:.2f} | {product['availability']} ({product['stock']} units) | {product['category']} | {product['brand']}\n"
         
-        elif intent_data["intent"] == "product_recommendation":
-            recommendations = get_product_recommendations(
-                category=intent_data["category"],
-                brand=intent_data["brand"],
-                limit=8
+        elif intent_data.get("intent") == "product_recommendation":
+            recommendations = await get_product_recommendations(
+                category=intent_data.get("category"),
+                brand=intent_data.get("brand"),
+                limit=10
             )
             product_results = recommendations
             
             if recommendations:
-                db_context += f"\nProduct Recommendations:\n"
+                db_context += "\n=== Product Recommendations ===\n"
                 for product in recommendations:
-                    description = product['description'] or "No description available"
-                    db_context += f"- {product['name']} (${product['price']:.2f}): {description[:100]}{'...' if len(description) > 100 else ''}\n"
+                    description = product['description'] or "No description"
+                    db_context += f"• {product['name']} (${product['price']:.2f}) - {description[:80]}...\n"
         
-        # Also retrieve relevant FAQ entries
-        retrieved_docs = vectorstore.similarity_search(question, k=2)
-        faq_context = "\n".join([doc.page_content for doc in retrieved_docs])
+        # Get FAQ context
+        faq_context = ""
+        if vectorstore:
+            try:
+                retrieved_docs = vectorstore.similarity_search(question, k=3)
+                faq_context = "\n=== FAQ Information ===\n" + "\n".join([doc.page_content for doc in retrieved_docs])
+            except Exception as e:
+                logger.error(f"FAQ retrieval failed: {e}")
         
-        # Build the full context
-        context = f"{db_context}\n\nFAQ Knowledge Base:\n{faq_context}"
+        # Build full context
+        context = f"{db_context}\n{faq_context}"
+        
+        # Enhanced prompt
+        prompt = f"""You are ShopBot, an AI customer service assistant for an e-commerce store.
 
-        # Create improved ShopBot prompt with explicit category information
-        prompt = f"""You are 'ShopBot', an AI customer service assistant for an e-commerce store.
-        You have access to the product database, category listings, and FAQ knowledge.
-        
-        Use the following context information to answer the customer's question:
-        
-        {context}
-        
-        Customer Question: {question}
-        
-        Response guidelines:
-        1. ALWAYS LEAD with actual product or category information when available - show what you have first.
-        2. If the customer is asking about product categories, present the EXACT list of available categories from the database.
-        3. NEVER make up or invent category names like "Category A, B, C" - only use the actual category names from the database.
-        4. When showing categories, include both the name and description when available.
-        5. If we have product information matching their query, present it immediately in a helpful way.
-        6. Only ask clarifying questions if absolutely necessary AFTER showing what information you already have.
-        7. If the customer's query is vague but you have partial matches, show those options instead of asking for clarification.
-        8. Be concise, helpful, and friendly.
-        
-        Products available: {len(product_results)}
-        Categories available: {len(categories_list)}
-        
-        If showing categories, ONLY use these exact category names: {", ".join([cat["name"] for cat in categories_list]) if categories_list else "None available"}
-        
-        NOTE: YOU CAN BROWSE PRODUCT CATEGORIES. If the user asks to see categories, always show them the full list.
-        """
+Context Information:
+{context}
+
+Customer Question: "{question}"
+
+Response Guidelines:
+1. Always prioritize showing actual data from our systems
+2. Be specific and helpful with product information
+3. If showing categories or brands, use exact names from our database
+4. For stock checks, clearly state availability and pricing
+5. Keep responses concise but informative
+6. If no relevant data is found, acknowledge this and offer alternatives
+7. Always maintain a friendly, professional tone
+
+Respond naturally and helpfully based on the available information."""
 
         response = model.generate_content(prompt)
         return {"response": response.text}
     
     except Exception as e:
-        error_message = f"Error processing chat: {str(e)}"
-        print(error_message)
-        return {"response": "Sorry, I encountered an error while processing your request. Please try again."}
+        logger.error(f"Chat error: {e}")
+        return {"response": "I'm experiencing technical difficulties. Please try again in a moment."}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
